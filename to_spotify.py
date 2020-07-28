@@ -4,12 +4,12 @@ import itertools
 import time
 
 from requests import get, post
-from flask import Flask, redirect, request
+from flask import Flask, redirect, request, make_response, jsonify
 
 from secrets import SECRET, CLIENT_ID, REDIRECT_URI
 
 
-SCOPE = 'playlist-modify-private'
+SCOPE = 'playlist-modify-public,playlist-modify-private'
 
 AUTHORIZE_URL = 'https://accounts.spotify.com/authorize'
 TOKEN_URL = 'https://accounts.spotify.com/api/token'
@@ -83,10 +83,18 @@ def grouper(n, iterable):
        yield chunk
 
 
-def add_tracks(token, playlist_id, uris):
+def add_tracks(token, playlist_id, uris, position=None):
+    errors = []
+
     for uris_group in grouper(10, uris):
-        post(ADD_TRACKS_URL.format(playlist_id=playlist_id),
-             json=dict(uris=uris_group), headers=user_headers(token))
+        res = post(ADD_TRACKS_URL.format(playlist_id=playlist_id),
+                   json=dict(uris=uris_group, position=position),
+                   headers=user_headers(token))
+
+        if res.status_code >= 300:
+            errors.append(res.json())
+
+    return errors
 
 
 if __name__ == '__main__':
@@ -105,22 +113,41 @@ if __name__ == '__main__':
 
 
     @app.route('/callback/')
-    def callback():
+    def _callback():
         code = request.args.get('code')
+        token = access_token(code)
+
+        resp = make_response('authenticated!')
+        resp.set_cookie('token', token)
+        return resp
+
+
+    @app.route('/add_tracks')
+    def _add_tracks():
+        token = request.cookies.get('token')
+
+        playlist_id = request.args.get('pl')
+        position = request.args.get('pos') or 0
+
+        track_ids = request.args.getlist('ts')
+
+        return jsonify(add_tracks(token, playlist_id, track_ids, position) or 'done!')
+
+
+    @app.route('/import_playlist', methods=['POST'])
+    def _import_playlist():
+        token = request.cookies.get('token')
 
         try:
-            if code:
-                token = access_token(code)
+            if token:
+                profile = user_profile(token)
 
-                if token:
-                    profile = user_profile(token)
+                if profile['id']:
+                    playlist = create_playlist(profile['id'], token)
 
-                    if profile['id']:
-                        playlist = create_playlist(profile['id'], token)
-
-                        if playlist:
-                           add_tracks(token, playlist['id'], find_tracks(token))
-                           return 'success!'
+                    if playlist:
+                       add_tracks(token, playlist['id'], find_tracks(token))
+                       return 'success!'
 
         except Exception as e:
             f'error: {e}'
